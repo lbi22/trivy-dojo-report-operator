@@ -50,6 +50,7 @@ def configure(settings: kopf.OperatorSettings, **_):
     settings.watching.connect_timeout = 60
     settings.watching.server_timeout = 600
     settings.watching.client_timeout = 610
+    settings.execution.max_workers = settings.KOPF_HANDLER_CONCURRENCY
 
     settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
         [

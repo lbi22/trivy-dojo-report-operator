@@ -56,6 +56,8 @@ DEFECT_DOJO_EVAL_ENV_NAME: bool = get_env_var_bool(
     "DEFECT_DOJO_EVAL_ENV_NAME"
 )
 
+KOPF_HANDLER_CONCURRENCY: int = int(os.getenv("KOPF_HANDLER_CONCURRENCY", "1"))
+
 DEFECT_DOJO_TEST_TITLE: str = os.getenv("DEFECT_DOJO_TEST_TITLE", "Kubernetes")
 DEFECT_DOJO_EVAL_TEST_TITLE: bool = get_env_var_bool("DEFECT_DOJO_EVAL_TEST_TITLE")
 
