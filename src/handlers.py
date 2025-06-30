@@ -1,8 +1,9 @@
 import json
 from io import BytesIO
 import requests
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, RequestException
 import kopf
+import copy
 
 import settings
 
@@ -13,15 +14,19 @@ REQUEST_TIME = prometheus.Summary(
     "request_processing_seconds", "Time spent processing request"
 )
 PROMETHEUS_DISABLE_CREATED_SERIES = True
-
-c = prometheus.Counter("requests_total", "HTTP Requests", ["status"])
+c = prometheus.Counter("defectdojo_requests_total", "Total DefectDojo Import/Re-import Requests", ["status"])
 
 proxies = {
     "http": settings.HTTP_PROXY,
     "https": settings.HTTPS_PROXY,
 } if settings.HTTP_PROXY or settings.HTTPS_PROXY else None
 
+
 def check_allowed_reports(report: str):
+    """
+    Validates if the report type is in the allowed list defined in the function.
+    Exits the program if the report type is not allowed.
+    """
     allowed_reports: list[str] = [
         "configauditreports",
         "vulnerabilityreports",
@@ -40,34 +45,62 @@ def check_allowed_reports(report: str):
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     """
-    Configure kopf
+    Configure kopf operator settings on startup.
     """
-
-    # kopf randomly stops watching resources. setting timeouts is supposed to help.
-    # see these issue for more info:
-    # https://github.com/nolar/kopf/issues/957
-    # https://github.com/nolar/kopf/issues/585
-    # https://github.com/nolar/kopf/issues/955
-    # see https://kopf.readthedocs.io/en/latest/configuration/#api-timeouts
     settings.watching.connect_timeout = 60
     settings.watching.server_timeout = 600
     settings.watching.client_timeout = 610
 
-    # This function tells kopf to use the StatusDiffBaseStorage instead
-    # of the annotations-based storage, because the annotation will get too large
-    # for k8s to handle. see: https://github.com/kubernetes-sigs/kubebuilder/issues/2556
     settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
         [
             kopf.StatusDiffBaseStorage(field="status.diff-base"),
         ]
     )
 
+def send_batch_to_dojo(logger, headers: dict, base_data: dict, report_body: dict, proxies: dict | None):
+    """
+    Sends a single batch of vulnerabilities to the DefectDojo reimport-scan API.
+
+    This function takes a report body containing a subset of vulnerabilities
+    and sends it to DefectDojo. It handles the HTTP request and error checking.
+
+    """
+    json_string: str = json.dumps(report_body)
+    json_file: BytesIO = BytesIO(json_string.encode("utf-8"))
+    report_file: dict = {"file": ("report.json", json_file)}
+
+    try:
+        response: requests.Response = requests.post(
+            settings.DEFECT_DOJO_URL + "/api/v2/reimport-scan/",
+            headers=headers,
+            data=base_data,
+            files=report_file,
+            verify=True,
+            proxies=proxies,
+            timeout=120
+        )
+        response.raise_for_status()
+        num_vulns = len(report_body.get('report', {}).get('vulnerabilities', []))
+        logger.info(f"Successfully submitted a batch of {num_vulns} vulnerabilities.")
+        logger.debug(f"DefectDojo response: {response.content}")
+    except HTTPError as http_err:
+        raise kopf.TemporaryError(
+            f"HTTP error occurred on batch submission: {http_err} - {response.content}. Retrying...",
+            delay=60,
+        )
+    except RequestException as req_err:
+        raise kopf.TemporaryError(
+            f"Request error occurred on batch submission: {req_err}. Retrying...",
+            delay=60,
+        )
+
 
 labels: dict = {}
 if settings.LABEL and settings.LABEL_VALUE:
     labels = {settings.LABEL: settings.LABEL_VALUE}
-else:
-    labels = {}
+elif settings.LABEL:
+    labels = {settings.LABEL: kopf.PRESENT}
+
 
 for report in settings.REPORTS:
     # check if reports are allowed
@@ -77,61 +110,27 @@ for report in settings.REPORTS:
     @kopf.on.create(report.lower() + ".aquasecurity.github.io", labels=labels)
     def send_to_dojo(body, meta, logger, **_):
         """
-        The main function that creates a report-file from the trivy-operator vulnerabilityreport
-        and sends it to the defectdojo instance.
+        Main handler that processes a report, splits it into batches if necessary,
+        and sends them to DefectDojo.
         """
+        kind = body.get('kind', 'UnknownKind')
+        name = meta.get('name', 'UnknownName')
+        logger.info(f"Working on {kind} {name}")
 
-        logger.info(f"Working on {body['kind']} {meta['name']}")
+        vulnerabilities = body.get('report', {}).get('vulnerabilities', [])
+        
+        if not vulnerabilities:
+            logger.info(f"Report {name} contains no vulnerabilities. Nothing to send.")
+            return
 
-        # body is the whole kubernetes manifest of a vulnerabilityreport
-        # body is a Python-Object that is not json-serializable,
-        # but body[kind], body[metadata] and so on are
-        # so we create a new json-object here, since kopf does not provide this
-        full_object: dict = {}
-        for i in body:
-            full_object[i] = body[i]
+        logger.info(f"Found {len(vulnerabilities)} total vulnerabilities. Processing in batches of {settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE}.")
 
-        logger.debug(full_object)
-
-        _DEFECT_DOJO_ENGAGEMENT_NAME = (
-            eval(settings.DEFECT_DOJO_ENGAGEMENT_NAME)
-            if settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME
-            else settings.DEFECT_DOJO_ENGAGEMENT_NAME
-        )
-
-        _DEFECT_DOJO_PRODUCT_NAME = (
-            eval(settings.DEFECT_DOJO_PRODUCT_NAME)
-            if settings.DEFECT_DOJO_EVAL_PRODUCT_NAME
-            else settings.DEFECT_DOJO_PRODUCT_NAME
-        )
-
-        _DEFECT_DOJO_PRODUCT_TYPE_NAME = (
-            eval(settings.DEFECT_DOJO_PRODUCT_TYPE_NAME)
-            if settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME
-            else settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
-        )
-        _DEFECT_DOJO_SERVICE_NAME = (
-            eval(settings.DEFECT_DOJO_SERVICE_NAME)
-            if settings.DEFECT_DOJO_EVAL_SERVICE_NAME
-            else settings.DEFECT_DOJO_SERVICE_NAME
-        )
-
-        _DEFECT_DOJO_ENV_NAME = (
-            eval(settings.DEFECT_DOJO_ENV_NAME)
-            if settings.DEFECT_DOJO_EVAL_ENV_NAME
-            else settings.DEFECT_DOJO_ENV_NAME
-        )
-
-        _DEFECT_DOJO_TEST_TITLE = (
-            eval(settings.DEFECT_DOJO_TEST_TITLE)
-            if settings.DEFECT_DOJO_EVAL_TEST_TITLE
-            else settings.DEFECT_DOJO_TEST_TITLE
-        )
-
-        # define the vulnerabilityreport as a json-file so DD accepts it
-        json_string: str = json.dumps(full_object)
-        json_file: BytesIO = BytesIO(json_string.encode("utf-8"))
-        report_file: dict = {"file": ("report.json", json_file)}
+        _DEFECT_DOJO_ENGAGEMENT_NAME = eval(settings.DEFECT_DOJO_ENGAGEMENT_NAME) if settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else settings.DEFECT_DOJO_ENGAGEMENT_NAME
+        _DEFECT_DOJO_PRODUCT_NAME = eval(settings.DEFECT_DOJO_PRODUCT_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.DEFECT_DOJO_PRODUCT_NAME
+        _DEFECT_DOJO_PRODUCT_TYPE_NAME = eval(settings.DEFECT_DOJO_PRODUCT_TYPE_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME else settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
+        _DEFECT_DOJO_SERVICE_NAME = eval(settings.DEFECT_DOJO_SERVICE_NAME) if settings.DEFECT_DOJO_EVAL_SERVICE_NAME else settings.DEFECT_DOJO_SERVICE_NAME
+        _DEFECT_DOJO_ENV_NAME = eval(settings.DEFECT_DOJO_ENV_NAME) if settings.DEFECT_DOJO_EVAL_ENV_NAME else settings.DEFECT_DOJO_ENV_NAME
+        _DEFECT_DOJO_TEST_TITLE = eval(settings.DEFECT_DOJO_TEST_TITLE) if settings.DEFECT_DOJO_EVAL_TEST_TITLE else settings.DEFECT_DOJO_TEST_TITLE
 
         headers: dict = {
             "Authorization": "Token " + settings.DEFECT_DOJO_API_KEY,
@@ -147,7 +146,7 @@ for report in settings.REPORTS:
             "minimum_severity": settings.DEFECT_DOJO_MINIMUM_SEVERITY,
             "auto_create_context": settings.DEFECT_DOJO_AUTO_CREATE_CONTEXT,
             "deduplication_on_engagement": settings.DEFECT_DOJO_DEDUPLICATION_ON_ENGAGEMENT,
-            "scan_type": "Trivy Operator Scan",
+            "scan_type": "Trivy Scan",
             "engagement_name": _DEFECT_DOJO_ENGAGEMENT_NAME,
             "product_name": _DEFECT_DOJO_PRODUCT_NAME,
             "product_type_name": _DEFECT_DOJO_PRODUCT_TYPE_NAME,
@@ -157,30 +156,26 @@ for report in settings.REPORTS:
             "do_not_reactivate": settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
         }
 
-        logger.debug(data)
+        logger.debug(f"Base data for DefectDojo: {data}")
 
-        try:
-            response: requests.Response = requests.post(
-                settings.DEFECT_DOJO_URL + "/api/v2/reimport-scan/",
-                headers=headers,
-                data=data,
-                files=report_file,
-                verify=True,
-                proxies=proxies,
-            )
-            response.raise_for_status()
-        except HTTPError as http_err:
-            c.labels("failed").inc()
-            raise kopf.TemporaryError(
-                f"HTTP error occurred: {http_err} - {response.content}. Retrying in 60 seconds",
-                delay=60,
-            )
-        except Exception as err:
-            c.labels("failed").inc()
-            raise kopf.TemporaryError(
-                f"Other error occurred: {err}. Retrying in 60 seconds", delay=60
-            )
-        else:
-            c.labels("success").inc()
-            logger.info(f"Finished {body['kind']} {meta['name']}")
-            logger.debug(response.content)
+        batch_size = settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE
+        total_batches = (len(vulnerabilities) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(vulnerabilities), batch_size):
+            current_batch_vulns = vulnerabilities[i:i + batch_size]
+            batch_report_body = copy.deepcopy(body)
+            batch_report_body['report']['vulnerabilities'] = current_batch_vulns
+
+            logger.info(f"Submitting batch {i//batch_size + 1}/{total_batches}...")
+
+            try:
+                send_batch_to_dojo(logger, headers, data, batch_report_body, proxies)
+                c.labels("success").inc()
+            except kopf.TemporaryError as e:
+                c.labels("failed").inc()
+                raise e
+            except Exception as e:
+                c.labels("failed").inc()
+                raise kopf.TemporaryError(f"An unexpected error occurred during batch processing: {e}", delay=60)
+        
+        logger.info(f"Finished processing all {total_batches} batches for {kind} {name}")
