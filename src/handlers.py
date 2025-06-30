@@ -5,7 +5,7 @@ from requests.exceptions import HTTPError, RequestException
 import kopf
 import copy
 
-import settings
+import settings as app_settings
 
 import prometheus_client as prometheus
 
@@ -17,9 +17,9 @@ PROMETHEUS_DISABLE_CREATED_SERIES = True
 c = prometheus.Counter("defectdojo_requests_total", "Total DefectDojo Import/Re-import Requests", ["status"])
 
 proxies = {
-    "http": settings.HTTP_PROXY,
-    "https": settings.HTTPS_PROXY,
-} if settings.HTTP_PROXY or settings.HTTPS_PROXY else None
+    "http": app_settings.HTTP_PROXY,
+    "https": app_settings.HTTPS_PROXY,
+} if app_settings.HTTP_PROXY or app_settings.HTTPS_PROXY else None
 
 
 def check_allowed_reports(report: str):
@@ -43,16 +43,16 @@ def check_allowed_reports(report: str):
 
 
 @kopf.on.startup()
-def configure(operator_settings: kopf.OperatorSettings, **_):
+def configure(settings: kopf.OperatorSettings, **_):
     """
-    Configure kopf operator settings on startup.
+    Configure kopf operator app_settings on startup.
     """
-    operator_settings.watching.connect_timeout = 60
-    operator_settings.watching.server_timeout = 600
-    operator_settings.watching.client_timeout = 610
-    operator_settings.execution.max_workers = settings.KOPF_HANDLER_CONCURRENCY
+    settings.watching.connect_timeout = 60
+    settings.watching.server_timeout = 600
+    settings.watching.client_timeout = 610
+    settings.execution.max_workers = app_settings.KOPF_HANDLER_CONCURRENCY
 
-    operator_settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
+    settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
         [
             kopf.StatusDiffBaseStorage(field="status.diff-base"),
         ]
@@ -72,7 +72,7 @@ def send_batch_to_dojo(logger, headers: dict, base_data: dict, report_body: dict
 
     try:
         response: requests.Response = requests.post(
-            settings.DEFECT_DOJO_URL + "/api/v2/reimport-scan/",
+            app_settings.DEFECT_DOJO_URL + "/api/v2/reimport-scan/",
             headers=headers,
             data=base_data,
             files=report_file,
@@ -97,13 +97,13 @@ def send_batch_to_dojo(logger, headers: dict, base_data: dict, report_body: dict
 
 
 labels: dict = {}
-if settings.LABEL and settings.LABEL_VALUE:
-    labels = {settings.LABEL: settings.LABEL_VALUE}
-elif settings.LABEL:
-    labels = {settings.LABEL: kopf.PRESENT}
+if app_settings.LABEL and app_settings.LABEL_VALUE:
+    labels = {app_settings.LABEL: app_settings.LABEL_VALUE}
+elif app_settings.LABEL:
+    labels = {app_settings.LABEL: kopf.PRESENT}
 
 
-for report in settings.REPORTS:
+for report in app_settings.REPORTS:
     # check if reports are allowed
     check_allowed_reports(report)
 
@@ -124,31 +124,31 @@ for report in settings.REPORTS:
             logger.info(f"Report {name} contains no vulnerabilities. Nothing to send.")
             return
 
-        logger.info(f"Found {len(vulnerabilities)} total vulnerabilities. Processing in batches of {settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE}.")
+        logger.info(f"Found {len(vulnerabilities)} total vulnerabilities. Processing in batches of {app_settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE}.")
 
         plain_body_dict = dict(body)
 
-        _DEFECT_DOJO_ENGAGEMENT_NAME = eval(settings.DEFECT_DOJO_ENGAGEMENT_NAME) if settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else settings.DEFECT_DOJO_ENGAGEMENT_NAME
-        _DEFECT_DOJO_PRODUCT_NAME = eval(settings.DEFECT_DOJO_PRODUCT_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.DEFECT_DOJO_PRODUCT_NAME
-        _DEFECT_DOJO_PRODUCT_TYPE_NAME = eval(settings.DEFECT_DOJO_PRODUCT_TYPE_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME else settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
-        _DEFECT_DOJO_SERVICE_NAME = eval(settings.DEFECT_DOJO_SERVICE_NAME) if settings.DEFECT_DOJO_EVAL_SERVICE_NAME else settings.DEFECT_DOJO_SERVICE_NAME
-        _DEFECT_DOJO_ENV_NAME = eval(settings.DEFECT_DOJO_ENV_NAME) if settings.DEFECT_DOJO_EVAL_ENV_NAME else settings.DEFECT_DOJO_ENV_NAME
-        _DEFECT_DOJO_TEST_TITLE = eval(settings.DEFECT_DOJO_TEST_TITLE) if settings.DEFECT_DOJO_EVAL_TEST_TITLE else settings.DEFECT_DOJO_TEST_TITLE
+        _DEFECT_DOJO_ENGAGEMENT_NAME = eval(app_settings.DEFECT_DOJO_ENGAGEMENT_NAME) if app_settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else app_settings.DEFECT_DOJO_ENGAGEMENT_NAME
+        _DEFECT_DOJO_PRODUCT_NAME = eval(app_settings.DEFECT_DOJO_PRODUCT_NAME) if app_settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else app_settings.DEFECT_DOJO_PRODUCT_NAME
+        _DEFECT_DOJO_PRODUCT_TYPE_NAME = eval(app_settings.DEFECT_DOJO_PRODUCT_TYPE_NAME) if app_settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME else app_settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
+        _DEFECT_DOJO_SERVICE_NAME = eval(app_settings.DEFECT_DOJO_SERVICE_NAME) if app_settings.DEFECT_DOJO_EVAL_SERVICE_NAME else app_settings.DEFECT_DOJO_SERVICE_NAME
+        _DEFECT_DOJO_ENV_NAME = eval(app_settings.DEFECT_DOJO_ENV_NAME) if app_settings.DEFECT_DOJO_EVAL_ENV_NAME else app_settings.DEFECT_DOJO_ENV_NAME
+        _DEFECT_DOJO_TEST_TITLE = eval(app_settings.DEFECT_DOJO_TEST_TITLE) if app_settings.DEFECT_DOJO_EVAL_TEST_TITLE else app_settings.DEFECT_DOJO_TEST_TITLE
 
         headers: dict = {
-            "Authorization": "Token " + settings.DEFECT_DOJO_API_KEY,
+            "Authorization": "Token " + app_settings.DEFECT_DOJO_API_KEY,
             "Accept": "application/json",
         }
 
         data: dict = {
-            "active": settings.DEFECT_DOJO_ACTIVE,
-            "verified": settings.DEFECT_DOJO_VERIFIED,
-            "close_old_findings": settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS,
-            "close_old_findings_product_scope": settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS_PRODUCT_SCOPE,
-            "push_to_jira": settings.DEFECT_DOJO_PUSH_TO_JIRA,
-            "minimum_severity": settings.DEFECT_DOJO_MINIMUM_SEVERITY,
-            "auto_create_context": settings.DEFECT_DOJO_AUTO_CREATE_CONTEXT,
-            "deduplication_on_engagement": settings.DEFECT_DOJO_DEDUPLICATION_ON_ENGAGEMENT,
+            "active": app_settings.DEFECT_DOJO_ACTIVE,
+            "verified": app_settings.DEFECT_DOJO_VERIFIED,
+            "close_old_findings": app_settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS,
+            "close_old_findings_product_scope": app_settings.DEFECT_DOJO_CLOSE_OLD_FINDINGS_PRODUCT_SCOPE,
+            "push_to_jira": app_settings.DEFECT_DOJO_PUSH_TO_JIRA,
+            "minimum_severity": app_settings.DEFECT_DOJO_MINIMUM_SEVERITY,
+            "auto_create_context": app_settings.DEFECT_DOJO_AUTO_CREATE_CONTEXT,
+            "deduplication_on_engagement": app_settings.DEFECT_DOJO_DEDUPLICATION_ON_ENGAGEMENT,
             "scan_type": "Trivy Scan",
             "engagement_name": _DEFECT_DOJO_ENGAGEMENT_NAME,
             "product_name": _DEFECT_DOJO_PRODUCT_NAME,
@@ -156,12 +156,12 @@ for report in settings.REPORTS:
             "service": _DEFECT_DOJO_SERVICE_NAME,
             "environment": _DEFECT_DOJO_ENV_NAME,
             "test_title": _DEFECT_DOJO_TEST_TITLE,
-            "do_not_reactivate": settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
+            "do_not_reactivate": app_settings.DEFECT_DOJO_DO_NOT_REACTIVATE,
         }
 
         logger.debug(f"Base data for DefectDojo: {data}")
 
-        batch_size = settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE
+        batch_size = app_settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE
         total_batches = (len(vulnerabilities) + batch_size - 1) // batch_size
         
         for i in range(0, len(vulnerabilities), batch_size):
