@@ -45,12 +45,15 @@ def check_allowed_reports(report: str):
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     """
-    Configure kopf operator app_settings on startup.
+    Configure kopf operator settings on startup.
     """
+    # Set the global concurrency limit for the operator.
+    # This controls how many handlers can run at the same time.
+    settings.execution.max_workers = app_settings.KOPF_HANDLER_CONCURRENCY
+
     settings.watching.connect_timeout = 60
     settings.watching.server_timeout = 600
     settings.watching.client_timeout = 610
-    settings.execution.max_workers = app_settings.KOPF_HANDLER_CONCURRENCY
 
     settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
         [
@@ -81,7 +84,7 @@ def send_batch_to_dojo(logger, headers: dict, base_data: dict, report_body: dict
             timeout=120
         )
         response.raise_for_status()
-        num_vulns = len(report_body.get('report', {}).get('vulnerabilities', []))
+        num_vulns = len(report_body.get('vulnerabilities', []))
         logger.info(f"Successfully submitted a batch of {num_vulns} vulnerabilities.")
         logger.debug(f"DefectDojo response: {response.content}")
     except HTTPError as http_err:
@@ -103,12 +106,14 @@ elif app_settings.LABEL:
     labels = {app_settings.LABEL: kopf.PRESENT}
 
 
-for report in app_settings.REPORTS:
-    # check if reports are allowed
-    check_allowed_reports(report)
+for report_type in app_settings.REPORTS:
+    check_allowed_reports(report_type)
 
     @REQUEST_TIME.time()
-    @kopf.on.create(report.lower() + ".aquasecurity.github.io", labels=labels)
+    @kopf.on.create(
+        report_type.lower() + ".aquasecurity.github.io",
+        labels=labels,
+    )
     def send_to_dojo(body, meta, logger, **_):
         """
         Main handler that processes a report, splits it into batches if necessary,
@@ -118,7 +123,14 @@ for report in app_settings.REPORTS:
         name = meta.get('name', 'UnknownName')
         logger.info(f"Working on {kind} {name}")
 
-        vulnerabilities = body.get('report', {}).get('vulnerabilities', [])
+        # FIX: Extract the actual Trivy report from the '.report' field of the CR.
+        # This is the object that matches the schema DefectDojo expects.
+        trivy_report = body.get('report', {})
+        if not trivy_report:
+            logger.info(f"Report {name} is empty or has no '.report' field. Nothing to send.")
+            return
+
+        vulnerabilities = trivy_report.get('vulnerabilities', [])
         
         if not vulnerabilities:
             logger.info(f"Report {name} contains no vulnerabilities. Nothing to send.")
@@ -126,7 +138,12 @@ for report in app_settings.REPORTS:
 
         logger.info(f"Found {len(vulnerabilities)} total vulnerabilities. Processing in batches of {app_settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE}.")
 
-        plain_body_dict = dict(body)
+        # Create a template from the original report, but without the vulnerabilities.
+        # This preserves metadata like SchemaVersion, ArtifactName, etc.
+        report_template = copy.deepcopy(trivy_report)
+        if 'vulnerabilities' in report_template:
+            del report_template['vulnerabilities']
+
 
         _DEFECT_DOJO_ENGAGEMENT_NAME = eval(app_settings.DEFECT_DOJO_ENGAGEMENT_NAME) if app_settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else app_settings.DEFECT_DOJO_ENGAGEMENT_NAME
         _DEFECT_DOJO_PRODUCT_NAME = eval(app_settings.DEFECT_DOJO_PRODUCT_NAME) if app_settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else app_settings.DEFECT_DOJO_PRODUCT_NAME
@@ -166,13 +183,16 @@ for report in app_settings.REPORTS:
         
         for i in range(0, len(vulnerabilities), batch_size):
             current_batch_vulns = vulnerabilities[i:i + batch_size]
-            batch_report_body = copy.deepcopy(plain_body_dict)
-            batch_report_body['report']['vulnerabilities'] = current_batch_vulns
+
+            # Create a new report for this batch using the template and adding the vulnerabilities.
+            batch_report = copy.deepcopy(report_template)
+            batch_report['vulnerabilities'] = current_batch_vulns
 
             logger.info(f"Submitting batch {i//batch_size + 1}/{total_batches}...")
 
             try:
-                send_batch_to_dojo(logger, headers, data, batch_report_body, proxies)
+                # Pass the correctly-structured batch_report to the helper
+                send_batch_to_dojo(logger, headers, data, batch_report, proxies)
                 c.labels("success").inc()
             except kopf.TemporaryError as e:
                 c.labels("failed").inc()
