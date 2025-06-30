@@ -125,6 +125,8 @@ for report in settings.REPORTS:
 
         logger.info(f"Found {len(vulnerabilities)} total vulnerabilities. Processing in batches of {settings.DEFECT_DOJO_VULNERABILITY_BATCH_SIZE}.")
 
+        plain_body_dict = dict(body)
+
         _DEFECT_DOJO_ENGAGEMENT_NAME = eval(settings.DEFECT_DOJO_ENGAGEMENT_NAME) if settings.DEFECT_DOJO_EVAL_ENGAGEMENT_NAME else settings.DEFECT_DOJO_ENGAGEMENT_NAME
         _DEFECT_DOJO_PRODUCT_NAME = eval(settings.DEFECT_DOJO_PRODUCT_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_NAME else settings.DEFECT_DOJO_PRODUCT_NAME
         _DEFECT_DOJO_PRODUCT_TYPE_NAME = eval(settings.DEFECT_DOJO_PRODUCT_TYPE_NAME) if settings.DEFECT_DOJO_EVAL_PRODUCT_TYPE_NAME else settings.DEFECT_DOJO_PRODUCT_TYPE_NAME
@@ -163,7 +165,7 @@ for report in settings.REPORTS:
         
         for i in range(0, len(vulnerabilities), batch_size):
             current_batch_vulns = vulnerabilities[i:i + batch_size]
-            batch_report_body = copy.deepcopy(body)
+            batch_report_body = copy.deepcopy(plain_body_dict)
             batch_report_body['report']['vulnerabilities'] = current_batch_vulns
 
             logger.info(f"Submitting batch {i//batch_size + 1}/{total_batches}...")
