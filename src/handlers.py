@@ -43,16 +43,16 @@ def check_allowed_reports(report: str):
 
 
 @kopf.on.startup()
-def configure(settings: kopf.OperatorSettings, **_):
+def configure(operator_settings: kopf.OperatorSettings, **_):
     """
     Configure kopf operator settings on startup.
     """
-    settings.watching.connect_timeout = 60
-    settings.watching.server_timeout = 600
-    settings.watching.client_timeout = 610
-    settings.execution.max_workers = settings.KOPF_HANDLER_CONCURRENCY
+    operator_settings.watching.connect_timeout = 60
+    operator_settings.watching.server_timeout = 600
+    operator_settings.watching.client_timeout = 610
+    operator_settings.execution.max_workers = settings.KOPF_HANDLER_CONCURRENCY
 
-    settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
+    operator_settings.persistence.diffbase_storage = kopf.MultiDiffBaseStorage(
         [
             kopf.StatusDiffBaseStorage(field="status.diff-base"),
         ]
